@@ -191,36 +191,24 @@ function signalQuality(rssi?: number) {
   return 'signal-poor';
 }
 async function refreshConnectedDevices() {
-  if (mockMode.value) {
+  const id = client.deviceId;
+
+  if (mockMode.value || !connected.value || !id) {
     connectedDevices.value = [];
     return;
   }
-  let platformDevices: BleDevice[] = [];
-  try {
-    await BleClient.initialize();
-    platformDevices = await BleClient.getConnectedDevices([JBD_SERVICE_UUID]);
-  } catch {
-    platformDevices = [];
-  }
-  const listed = new Map(platformDevices.map(device => {
-    const scanResult = devices.value.find(candidate => candidate.deviceId === device.deviceId);
-    return [device.deviceId, {
-      ...device,
-      name: device.deviceId === client.deviceId
-        ? deviceName.value
-        : device.name || scanResult?.name || `JBD BMS · ${device.deviceId.slice(-5)}`,
-      rssi: scanResult?.rssi,
-    } satisfies DiscoveredDevice];
-  }));
-  if (client.deviceId && !listed.has(client.deviceId)) {
-    const scanResult = devices.value.find(candidate => candidate.deviceId === client.deviceId);
-    listed.set(client.deviceId, {
-      deviceId: client.deviceId,
-      name: deviceName.value || scanResult?.name || `JBD BMS · ${client.deviceId.slice(-5)}`,
-      rssi: scanResult?.rssi,
-    });
-  }
-  connectedDevices.value = [...listed.values()];
+
+  const scanResult = devices.value.find(
+    device => device.deviceId === id,
+  );
+
+  connectedDevices.value = [{
+    deviceId: id,
+    name: deviceName.value
+      || scanResult?.name
+      || `JBD BMS · ${id.slice(-5)}`,
+    rssi: scanResult?.rssi,
+  }];
 }
 async function startScan() {
   if (mockMode.value) return;
@@ -547,8 +535,8 @@ const val = (n: number | null, digits = 1) => n === null ? '—' : n.toFixed(dig
         <div class="setting-row unsupported"><span>Display Celsius</span><span class="unsupported-value">Неизвестный бит для этой модели</span></div>
       </section>
 
-      <section class="settings-group">
-        <h3>Управление выходами</h3>
+    <section v-if="mockMode" class="settings-group">
+      <h3>Управление выходами</h3>
         <label class="setting-toggle" :class="{ changed: isDirty('chargeDisabled') }"><span>Отключить заряд</span><input v-model="settings.chargeDisabled" type="checkbox"><span class="toggle-track" /></label>
         <label class="setting-toggle" :class="{ changed: isDirty('dischargeDisabled') }"><span>Отключить разряд</span><input v-model="settings.dischargeDisabled" type="checkbox"><span class="toggle-track" /></label>
         <p class="settings-note">При записи отключение заряда или разряда может прервать работу зарядного устройства или подключенной нагрузки.</p>

@@ -69,7 +69,7 @@ export interface BmsSettings {
   shuntResistanceRaw: number;
   secondaryProtectionRaw: number;
   level2DelayRaw: number;
-  mosfetControlRaw: number;
+  mosfetControlRaw: number | null;
 }
 
 export type EditableSettingKey = Exclude<keyof BmsSettings,
@@ -209,7 +209,7 @@ export const CONFIG_REGISTERS = [
   0x20, 0x21, 0x22, 0x23, 0x24, 0x25, 0x26, 0x27, 0x28, 0x29,
   0x2a, 0x2b, 0x2c, 0x2d, 0x2e, 0x2f,
   0x32, 0x33, 0x34, 0x35, 0x36, 0x37, 0x38, 0x39,
-  0x3a, 0x3b, 0x3c, 0x3d, 0x3e, 0x3f, 0xe1,
+  0x3a, 0x3b, 0x3c, 0x3d, 0x3e, 0x3f,
 ];
 
 const REGISTER_FIELDS: Array<[EditableSettingKey, number, (value: number) => number]> = [
@@ -281,7 +281,7 @@ export function decodeBmsSettings(registers: Record<number, number>): BmsSetting
   const level2DelayHigh = highByte(level2DelayRaw);
   const level2DelayLow = lowByte(level2DelayRaw);
   const ntcConfigRaw = registers[0x2e];
-  const mosfetControlRaw = registers[0xe1];
+  const mosfetControlRaw = null;
   const level2OverVoltageDelayCode = (level2DelayHigh >> 4) & 0x03;
   const level2UnderVoltageDelayCode = (level2DelayHigh >> 6) & 0x03;
   return {
@@ -301,8 +301,8 @@ export function decodeBmsSettings(registers: Record<number, number>): BmsSetting
     deltaToBalanceMv: registers[0x2b],
     balancerEnabled: Boolean(functionConfigRaw & (1 << 2)),
     balanceOnlyWhenCharging: Boolean(functionConfigRaw & (1 << 3)),
-    chargeDisabled: Boolean(mosfetControlRaw & (1 << 0)),
-    dischargeDisabled: Boolean(mosfetControlRaw & (1 << 1)),
+    chargeDisabled: false,
+    dischargeDisabled: false,
     switchCircuitEnabled: Boolean(functionConfigRaw & (1 << 0)),
     ntc1Enabled: Boolean(ntcConfigRaw & (1 << 0)),
     ntc2Enabled: Boolean(ntcConfigRaw & (1 << 1)),
@@ -539,6 +539,9 @@ export function encodeBmsSettings(settings: BmsSettings, baseline: BmsSettings, 
     writes.push([0x2e, flags]);
   }
   if (dirtyKeys.includes('chargeDisabled') || dirtyKeys.includes('dischargeDisabled')) {
+    if (baseline.mosfetControlRaw === null) {
+      throw new Error('Управление выходами недоступно: состояние команды BMS неизвестно.');
+    }
     let flags = baseline.mosfetControlRaw;
     flags = settings.chargeDisabled ? flags | (1 << 0) : flags & ~(1 << 0);
     flags = settings.dischargeDisabled ? flags | (1 << 1) : flags & ~(1 << 1);
