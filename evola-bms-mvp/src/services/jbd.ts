@@ -3,7 +3,8 @@ import type { BleDevice } from '@capacitor-community/bluetooth-le';
 
 // Standard JBD/Xiaoxiang UART-over-BLE profile; some BMS variants use a different profile.
 const BASE = '-0000-1000-8000-00805f9b34fb';
-const SERVICE = `0000ff00${BASE}`;
+export const JBD_SERVICE_UUID = `0000ff00${BASE}`;
+const SERVICE = JBD_SERVICE_UUID;
 const NOTIFY = `0000ff01${BASE}`;
 const WRITE = `0000ff02${BASE}`;
 
@@ -11,13 +12,22 @@ export interface BmsData {
   voltage: number | null;
   current: number | null;
   soc: number | null;
+  remainingCapacityAh: number | null;
+  nominalCapacityAh: number | null;
   temperatures: number[];
   cells: number[];
   updatedAt: number | null;
 }
 
 export const emptyBmsData = (): BmsData => ({
-  voltage: null, current: null, soc: null, temperatures: [], cells: [], updatedAt: null,
+  voltage: null,
+  current: null,
+  soc: null,
+  remainingCapacityAh: null,
+  nominalCapacityAh: null,
+  temperatures: [],
+  cells: [],
+  updatedAt: null,
 });
 
 interface PendingResponse {
@@ -87,6 +97,7 @@ export class JbdClient {
   async connect(selectedDevice?: BleDevice): Promise<string> {
     await BleClient.initialize();
     const device = selectedDevice ?? await BleClient.requestDevice({ services: [SERVICE] });
+    this.resetData();
     this.deviceId = device.deviceId;
     try {
       await BleClient.connect(device.deviceId, () => this.handleDisconnect());
@@ -107,6 +118,7 @@ export class JbdClient {
     this.deviceId = null;
     this.rejectPending(new Error('Bluetooth device disconnected.'));
     this.assembler.reset();
+    this.resetData();
     if (id) {
       try { await BleClient.stopNotifications(id, SERVICE, NOTIFY); } catch { /* ignore */ }
       try { await BleClient.disconnect(id); } catch { /* ignore */ }
@@ -118,7 +130,12 @@ export class JbdClient {
     this.deviceId = null;
     this.rejectPending(new Error('Bluetooth device disconnected.'));
     this.assembler.reset();
+    this.resetData();
     this.onDisconnected();
+  }
+  private resetData() {
+    Object.assign(this.data, emptyBmsData());
+    this.onUpdate({ ...this.data });
   }
   async readConfigRegisters(registers: number[]): Promise<Record<number, number>> {
     return this.withFactoryMode(false, async () => {
@@ -223,8 +240,11 @@ export class JbdClient {
   private parse(register: number, payload: Uint8Array) {
     const v = new DataView(payload.buffer, payload.byteOffset, payload.byteLength);
     if (register === 3 && payload.length >= 23) {
+      const currentAndCapacityScale = v.getUint8(20) & 0x80 ? 0.1 : 0.01;
       this.data.voltage = v.getUint16(0, false) / 100;
-      this.data.current = v.getInt16(2, false) / 100;
+      this.data.current = v.getInt16(2, false) * currentAndCapacityScale;
+      this.data.remainingCapacityAh = v.getUint16(4, false) * currentAndCapacityScale;
+      this.data.nominalCapacityAh = v.getUint16(6, false) * currentAndCapacityScale;
       this.data.soc = v.getUint8(19);
       const count = v.getUint8(22);
       this.data.temperatures = [];

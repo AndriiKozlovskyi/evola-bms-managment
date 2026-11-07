@@ -15,6 +15,8 @@ export interface BmsSettings {
   deltaToBalanceMv: number;
   balancerEnabled: boolean;
   balanceOnlyWhenCharging: boolean;
+  chargeDisabled: boolean;
+  dischargeDisabled: boolean;
   switchCircuitEnabled: boolean;
   ntc1Enabled: boolean;
   ntc2Enabled: boolean;
@@ -67,6 +69,7 @@ export interface BmsSettings {
   shuntResistanceRaw: number;
   secondaryProtectionRaw: number;
   level2DelayRaw: number;
+  mosfetControlRaw: number;
 }
 
 export type EditableSettingKey = Exclude<keyof BmsSettings,
@@ -74,7 +77,8 @@ export type EditableSettingKey = Exclude<keyof BmsSettings,
   | 'ntcConfigRaw'
   | 'shuntResistanceRaw'
   | 'secondaryProtectionRaw'
-  | 'level2DelayRaw'>;
+  | 'level2DelayRaw'
+  | 'mosfetControlRaw'>;
 export type NumericSettingKey = {
   [Key in keyof BmsSettings]: BmsSettings[Key] extends number ? Key : never;
 }[keyof BmsSettings] & EditableSettingKey;
@@ -99,6 +103,8 @@ export const EDITABLE_SETTING_KEYS: EditableSettingKey[] = [
   'deltaToBalanceMv',
   'balancerEnabled',
   'balanceOnlyWhenCharging',
+  'chargeDisabled',
+  'dischargeDisabled',
   'switchCircuitEnabled',
   'ntc1Enabled', 'ntc2Enabled', 'ntc3Enabled', 'ntc4Enabled',
   'ntc5Enabled', 'ntc6Enabled', 'ntc7Enabled', 'ntc8Enabled',
@@ -187,8 +193,11 @@ export const MOCK_BMS_SETTINGS: BmsSettings = {
   level3ShortCircuitDelayCode: 1,
   level3ShortCircuitDouble: true,
   level3ResetSeconds: 5,
+  chargeDisabled: false,
+  dischargeDisabled: false,
   functionConfigRaw: 0x0004,
   ntcConfigRaw: 0x0003,
+  mosfetControlRaw: 0,
   shuntResistanceRaw: 1,
   secondaryProtectionRaw: 0x8e6b,
   level2DelayRaw: 0xf005,
@@ -200,7 +209,7 @@ export const CONFIG_REGISTERS = [
   0x20, 0x21, 0x22, 0x23, 0x24, 0x25, 0x26, 0x27, 0x28, 0x29,
   0x2a, 0x2b, 0x2c, 0x2d, 0x2e, 0x2f,
   0x32, 0x33, 0x34, 0x35, 0x36, 0x37, 0x38, 0x39,
-  0x3a, 0x3b, 0x3c, 0x3d, 0x3e, 0x3f,
+  0x3a, 0x3b, 0x3c, 0x3d, 0x3e, 0x3f, 0xe1,
 ];
 
 const REGISTER_FIELDS: Array<[EditableSettingKey, number, (value: number) => number]> = [
@@ -272,6 +281,7 @@ export function decodeBmsSettings(registers: Record<number, number>): BmsSetting
   const level2DelayHigh = highByte(level2DelayRaw);
   const level2DelayLow = lowByte(level2DelayRaw);
   const ntcConfigRaw = registers[0x2e];
+  const mosfetControlRaw = registers[0xe1];
   const level2OverVoltageDelayCode = (level2DelayHigh >> 4) & 0x03;
   const level2UnderVoltageDelayCode = (level2DelayHigh >> 6) & 0x03;
   return {
@@ -291,6 +301,8 @@ export function decodeBmsSettings(registers: Record<number, number>): BmsSetting
     deltaToBalanceMv: registers[0x2b],
     balancerEnabled: Boolean(functionConfigRaw & (1 << 2)),
     balanceOnlyWhenCharging: Boolean(functionConfigRaw & (1 << 3)),
+    chargeDisabled: Boolean(mosfetControlRaw & (1 << 0)),
+    dischargeDisabled: Boolean(mosfetControlRaw & (1 << 1)),
     switchCircuitEnabled: Boolean(functionConfigRaw & (1 << 0)),
     ntc1Enabled: Boolean(ntcConfigRaw & (1 << 0)),
     ntc2Enabled: Boolean(ntcConfigRaw & (1 << 1)),
@@ -340,6 +352,7 @@ export function decodeBmsSettings(registers: Record<number, number>): BmsSetting
     level3ResetSeconds: level2DelayLow,
     functionConfigRaw,
     ntcConfigRaw,
+    mosfetControlRaw,
     shuntResistanceRaw: registers[0x2c],
     secondaryProtectionRaw,
     level2DelayRaw,
@@ -524,6 +537,12 @@ export function encodeBmsSettings(settings: BmsSettings, baseline: BmsSettings, 
       flags = settings[key] ? flags | (1 << index) : flags & ~(1 << index);
     });
     writes.push([0x2e, flags]);
+  }
+  if (dirtyKeys.includes('chargeDisabled') || dirtyKeys.includes('dischargeDisabled')) {
+    let flags = baseline.mosfetControlRaw;
+    flags = settings.chargeDisabled ? flags | (1 << 0) : flags & ~(1 << 0);
+    flags = settings.dischargeDisabled ? flags | (1 << 1) : flags & ~(1 << 1);
+    writes.push([0xe1, flags]);
   }
   return writes;
 }

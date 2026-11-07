@@ -6,14 +6,13 @@ import {
   BatteryFull,
   BluetoothConnected,
   BluetoothSearching,
-  CircleCheck,
   RefreshCw,
   Save,
   Search,
   SlidersHorizontal,
   X,
 } from '@lucide/vue';
-import { JbdClient, emptyBmsData } from './services/jbd';
+import { JBD_SERVICE_UUID, JbdClient, emptyBmsData } from './services/jbd';
 import { BMS_CONFIG } from './services/bmsConfig';
 import { mockBmsData } from './services/mockBms';
 import {
@@ -72,13 +71,16 @@ const ntcFields: Array<{ key: BooleanSettingKey; label: string }> = [
 ];
 
 const DEMO_DEVICE_NAME = 'Демо BMS · 13S';
-const data = ref(mockBmsData());
+const mockMode = ref(false);
+const data = ref(emptyBmsData());
 const connected = ref(false);
 const connecting = ref(false);
-const deviceName = ref(DEMO_DEVICE_NAME);
+const connectingDeviceId = ref<string | null>(null);
+const deviceName = ref('');
 const error = ref('');
 const activeTab = ref<Tab>('home');
 const devices = ref<DiscoveredDevice[]>([]);
+const connectedDevices = ref<DiscoveredDevice[]>([]);
 const scanning = ref(false);
 const settings = ref<BmsSettings>({ ...MOCK_BMS_SETTINGS });
 const savedSettings = ref<BmsSettings>({ ...MOCK_BMS_SETTINGS });
@@ -87,14 +89,17 @@ const settingsLoading = ref(false);
 const settingsSaving = ref(false);
 const showSaveConfirmation = ref(false);
 const settingsError = ref('');
-const settingsMessage = ref('Демо-настройки: подключитесь к BMS, чтобы прочитать текущие значения.');
+const settingsMessage = ref('Подключитесь к BMS, чтобы прочитать текущие настройки.');
+const availableDevices = computed(() => devices.value.filter(device =>
+  !connectedDevices.value.some(connectedDevice => connectedDevice.deviceId === device.deviceId)));
 const client = new JbdClient(
   next => { data.value = next; },
   () => {
     connected.value = false;
-    deviceName.value = DEMO_DEVICE_NAME;
-    data.value = mockBmsData();
+    deviceName.value = mockMode.value ? DEMO_DEVICE_NAME : '';
+    data.value = mockMode.value ? mockBmsData() : emptyBmsData();
     settingsLoaded.value = false;
+    void refreshConnectedDevices();
   },
 );
 const cellRange = computed(() => {
@@ -106,9 +111,38 @@ const cellRange = computed(() => {
 });
 const delta = computed(() => cellRange.value
   ? Math.round((cellRange.value.max - cellRange.value.min) * 1000) : null);
+const cellVoltageLimits = computed(() => {
+  if (!mockMode.value && !settingsLoaded.value) return null;
+  const min = settings.value.cellMinVoltageMv / 1000;
+  const max = settings.value.cellFullVoltageMv / 1000;
+  return Number.isFinite(min) && Number.isFinite(max) && min < max ? { min, max } : null;
+});
 function cellBarWidth(voltage: number) {
-  const { min, max } = BMS_CONFIG.cellVoltage;
-  return Math.max(0, Math.min(100, ((voltage - min) / (max - min)) * 100));
+  const limits = cellVoltageLimits.value;
+  if (limits) return Math.max(0, Math.min(100, ((voltage - limits.min) / (limits.max - limits.min)) * 100));
+  const range = cellRange.value;
+  if (!range) return 0;
+  const spread = range.max - range.min;
+  return spread === 0 ? 70 : 35 + ((voltage - range.min) / spread) * 65;
+}
+function cellExtremaClass(voltage: number) {
+  const range = cellRange.value;
+  if (!range || range.min === range.max) return '';
+  if (voltage === range.min) return 'cell-minimum';
+  if (voltage === range.max) return 'cell-maximum';
+  return '';
+}
+function cellVoltageLimitValue(edge: 'min' | 'max') {
+  return cellVoltageLimits.value?.[edge] ?? undefined;
+}
+function measuredCellVoltageLabel(edge: 'min' | 'max') {
+  const value = cellRange.value?.[edge];
+  return value === undefined ? '—' : `${value.toFixed(3)} В`;
+}
+const telemetryPending = computed(() => !mockMode.value && (connecting.value || (connected.value && (data.value.soc === null || data.value.cells.length === 0))));
+function displayValue(value: number | null, digits = 1) {
+  if (value !== null) return value.toFixed(digits);
+  return !mockMode.value && (connecting.value || connected.value) ? '…' : '—';
 }
 const dirtyKeys = computed(() => changedSettingKeys(settings.value, savedSettings.value));
 const settingsValid = computed(() => validateBmsSettings(settings.value));
@@ -137,6 +171,11 @@ function currentThresholdLabel(millivolts: number) {
   const doubled = settings.value.level3ShortCircuitDouble ? 2 : 1;
   return `${Math.round((millivolts * 10 / shunt) * doubled)} А`;
 }
+async function openDevices() {
+  if (mockMode.value) await setMockMode(false);
+  activeTab.value = 'devices';
+  await refreshConnectedDevices();
+}
 function errorText(value: unknown) {
   const message = value instanceof Error ? value.message : String(value);
   if (message.includes('navigator.bluetooth.requestLEScan is not a function')) {
@@ -144,20 +183,64 @@ function errorText(value: unknown) {
   }
   return message;
 }
+function signalQuality(rssi?: number) {
+  if (rssi === undefined) return 'signal-unknown';
+  if (rssi >= BMS_CONFIG.signalRssi.fullBars) return 'signal-strong';
+  if (rssi >= BMS_CONFIG.signalRssi.threeBars) return 'signal-medium';
+  if (rssi >= BMS_CONFIG.signalRssi.twoBars) return 'signal-weak';
+  return 'signal-poor';
+}
+async function refreshConnectedDevices() {
+  if (mockMode.value) {
+    connectedDevices.value = [];
+    return;
+  }
+  let platformDevices: BleDevice[] = [];
+  try {
+    await BleClient.initialize();
+    platformDevices = await BleClient.getConnectedDevices([JBD_SERVICE_UUID]);
+  } catch {
+    platformDevices = [];
+  }
+  const listed = new Map(platformDevices.map(device => {
+    const scanResult = devices.value.find(candidate => candidate.deviceId === device.deviceId);
+    return [device.deviceId, {
+      ...device,
+      name: device.deviceId === client.deviceId
+        ? deviceName.value
+        : device.name || scanResult?.name || `JBD BMS · ${device.deviceId.slice(-5)}`,
+      rssi: scanResult?.rssi,
+    } satisfies DiscoveredDevice];
+  }));
+  if (client.deviceId && !listed.has(client.deviceId)) {
+    const scanResult = devices.value.find(candidate => candidate.deviceId === client.deviceId);
+    listed.set(client.deviceId, {
+      deviceId: client.deviceId,
+      name: deviceName.value || scanResult?.name || `JBD BMS · ${client.deviceId.slice(-5)}`,
+      rssi: scanResult?.rssi,
+    });
+  }
+  connectedDevices.value = [...listed.values()];
+}
 async function startScan() {
+  if (mockMode.value) return;
   error.value = '';
   devices.value = [];
   try {
     await BleClient.initialize();
-    await BleClient.requestLEScan({}, result => {
+    await refreshConnectedDevices();
+    await BleClient.requestLEScan({ services: [JBD_SERVICE_UUID], allowDuplicates: true }, result => {
+      const localName = result.localName || result.device.name;
       const entry: DiscoveredDevice = {
         ...result.device,
-        name: result.localName || result.device.name || 'Устройство без имени',
+        name: localName || `JBD BMS · ${result.device.deviceId.slice(-5)}`,
         rssi: result.rssi,
       };
       const index = devices.value.findIndex(device => device.deviceId === entry.deviceId);
       if (index === -1) devices.value.push(entry);
       else devices.value[index] = entry;
+      const connectedIndex = connectedDevices.value.findIndex(device => device.deviceId === entry.deviceId);
+      if (connectedIndex !== -1) connectedDevices.value[connectedIndex] = { ...connectedDevices.value[connectedIndex], rssi: entry.rssi };
     });
     scanning.value = true;
   } catch (e) {
@@ -176,7 +259,7 @@ async function readSettingsFromBms() {
   return decodeBmsSettings(registers);
 }
 async function loadSettings() {
-  if (!connected.value || settingsLoading.value) return;
+  if (mockMode.value || !connected.value || settingsLoading.value) return;
   settingsLoading.value = true;
   settingsError.value = '';
   try {
@@ -194,34 +277,68 @@ async function loadSettings() {
   }
 }
 async function connectDevice(device?: DiscoveredDevice) {
+  if (mockMode.value) {
+    error.value = 'Переключитесь на реальные данные, чтобы подключить BMS.';
+    return;
+  }
   error.value = '';
   await stopScan();
   connecting.value = true;
+  connectingDeviceId.value = device?.deviceId ?? 'device-picker';
   try {
     deviceName.value = await client.connect(device);
     connected.value = true;
+    await refreshConnectedDevices();
     activeTab.value = 'home';
-    await loadSettings();
+    void loadSettings();
   } catch (e) { error.value = errorText(e); }
-  finally { connecting.value = false; }
+  finally {
+    connecting.value = false;
+    connectingDeviceId.value = null;
+  }
 }
-async function disconnectDevice() {
-  await client.disconnect();
+async function disconnectDevice(deviceId = client.deviceId) {
+  if (!deviceId) return;
+  if (deviceId === client.deviceId) {
+    await client.disconnect();
+    connected.value = false;
+    deviceName.value = mockMode.value ? DEMO_DEVICE_NAME : '';
+    data.value = mockMode.value ? mockBmsData() : emptyBmsData();
+    settingsLoaded.value = false;
+  } else {
+    try { await BleClient.disconnect(deviceId); }
+    catch (e) { error.value = errorText(e); }
+  }
+  await refreshConnectedDevices();
+}
+async function setMockMode(enabled: boolean) {
+  if (mockMode.value === enabled) return;
+  await stopScan();
+  if (connected.value) await client.disconnect();
   connected.value = false;
-  deviceName.value = DEMO_DEVICE_NAME;
-  data.value = emptyBmsData();
+  connecting.value = false;
+  connectingDeviceId.value = null;
+  mockMode.value = enabled;
+  devices.value = [];
+  data.value = enabled ? mockBmsData() : emptyBmsData();
+  deviceName.value = enabled ? DEMO_DEVICE_NAME : '';
+  settings.value = { ...MOCK_BMS_SETTINGS };
+  savedSettings.value = { ...MOCK_BMS_SETTINGS };
   settingsLoaded.value = false;
-}
-async function toggle() {
-  if (connected.value) await disconnectDevice();
-  else await connectDevice();
+  settingsError.value = '';
+  settingsMessage.value = enabled
+    ? 'Демо-данные: показания и настройки взяты из образца.'
+    : 'Подключитесь к BMS, чтобы прочитать текущие настройки.';
+  error.value = '';
+  await refreshConnectedDevices();
 }
 function requestSave() {
   settingsError.value = settingsValid.value.join(' ');
-  if (!settingsLoaded.value || !connected.value || dirtyKeys.value.length === 0 || settingsError.value) return;
+  if (mockMode.value || !settingsLoaded.value || !connected.value || dirtyKeys.value.length === 0 || settingsError.value) return;
   showSaveConfirmation.value = true;
 }
 async function saveSettings() {
+  if (mockMode.value || !connected.value || !settingsLoaded.value) return;
   showSaveConfirmation.value = false;
   settingsSaving.value = true;
   settingsError.value = '';
@@ -257,12 +374,21 @@ const val = (n: number | null, digits = 1) => n === null ? '—' : n.toFixed(dig
     <header class="app-header">
       <div>
         <p class="eyebrow">EVOLA / BATTERY MANAGEMENT</p>
-        <h1>{{ activeTab === 'devices' ? 'Устройства' : activeTab === 'settings' ? 'Настройки' : 'Батарея' }}</h1>
+        <h1>{{ activeTab === 'devices' ? 'Устройства' : activeTab === 'settings' ? 'Настройки' : deviceName || (mockMode ? DEMO_DEVICE_NAME : 'BMS не выбрана') }}</h1>
       </div>
-      <span :class="['connection-state', connected ? 'is-connected' : 'is-demo']">
-        <span class="state-dot" />{{ connected ? 'Подключено' : 'Демо-режим' }}
+      <span :class="['connection-state', connected ? 'is-connected' : mockMode ? 'is-demo' : 'is-offline']">
+        <span class="state-dot" />{{ connected ? 'Подключено' : mockMode ? 'Демо-данные' : 'Нет связи' }}
       </span>
     </header>
+
+    <div class="data-mode-switch" role="group" aria-label="Источник данных">
+      <button :class="{ active: !mockMode }" :aria-pressed="!mockMode" @click="setMockMode(false)">
+        <BluetoothConnected :size="15" />Реальные данные
+      </button>
+      <button :class="{ active: mockMode }" :aria-pressed="mockMode" @click="setMockMode(true)">
+        <BatteryFull :size="15" />Демо
+      </button>
+    </div>
 
     <p v-if="error" class="notice notice-error" role="alert">{{ error }}</p>
 
@@ -272,47 +398,71 @@ const val = (n: number | null, digits = 1) => n === null ? '—' : n.toFixed(dig
           <h2>Bluetooth LE</h2>
           <p>Найдите BMS поблизости и подключитесь к ней.</p>
         </div>
-        <button class="icon-button scan-button" :disabled="connecting" :aria-label="scanning ? 'Остановить поиск' : 'Начать поиск'" @click="scanning ? stopScan() : startScan()">
+        <button class="icon-button scan-button" :disabled="connecting || mockMode" :aria-label="scanning ? 'Остановить поиск' : 'Начать поиск'" @click="scanning ? stopScan() : startScan()">
           <X v-if="scanning" :size="18" />
           <BluetoothSearching v-else :size="18" />
         </button>
       </div>
-      <p v-if="scanning" class="scan-state"><span class="state-dot is-pulsing" />Поиск устройств…</p>
-      <div v-if="connected" class="device-row current-device">
-        <div class="device-glyph"><BluetoothConnected :size="20" /></div>
-        <div class="device-copy"><strong>{{ deviceName }}</strong><small>Текущее подключение</small></div>
-        <CircleCheck class="device-check" :size="18" />
+      <p v-if="mockMode" class="notice notice-demo">Bluetooth отключен в демо-режиме. Переключитесь на реальные данные для поиска BMS.</p>
+      <p v-if="connecting" class="scan-state"><RefreshCw :size="14" class="spinning" />Подключение к выбранной BMS…</p>
+      <p v-else-if="scanning" class="scan-state"><span class="state-dot is-pulsing" />Поиск устройств…</p>
+      <div class="device-list-heading">
+        <h3>Подключенные устройства</h3>
+        <span>{{ connectedDevices.length }}</span>
       </div>
-      <div v-for="device in devices" :key="device.deviceId" class="device-row">
+      <div v-for="device in connectedDevices" :key="`connected-${device.deviceId}`" class="device-row connected-device-row">
         <div class="device-glyph"><BluetoothConnected :size="20" /></div>
-        <div class="device-copy"><strong>{{ device.name }}</strong><small>{{ device.rssi === undefined ? 'BLE устройство' : `Сигнал ${device.rssi} dBm` }}</small></div>
+        <div class="device-copy">
+          <strong>{{ device.name }}</strong>
+          <small>{{ device.deviceId === client.deviceId ? 'Подключено в приложении' : 'Подключено в системе' }}</small>
+        </div>
+        <div :class="['signal-indicator', signalQuality(device.rssi)]" :aria-label="device.rssi === undefined ? 'Уровень сигнала недоступен' : `Сигнал ${device.rssi} dBm`">
+          <span class="signal-bars" aria-hidden="true"><i /><i /><i /><i /></span>
+          <small>{{ device.rssi === undefined ? '— dBm' : `${device.rssi} dBm` }}</small>
+        </div>
+        <button v-if="device.deviceId === client.deviceId" class="disconnect-button" @click="disconnectDevice(device.deviceId)">Отключить</button>
+        <span v-else class="connected-label">Подключено</span>
+      </div>
+      <div class="device-list-heading discovered-heading">
+        <h3>Найденные BMS</h3>
+        <span>{{ availableDevices.length }}</span>
+      </div>
+      <div v-for="device in availableDevices" :key="device.deviceId" class="device-row">
+        <div class="device-glyph"><BluetoothConnected :size="20" /></div>
+        <div class="device-copy"><strong>{{ device.name }}</strong><small>JBD · Bluetooth LE</small></div>
+        <div :class="['signal-indicator', signalQuality(device.rssi)]" :aria-label="device.rssi === undefined ? 'Уровень сигнала недоступен' : `Сигнал ${device.rssi} dBm`">
+          <span class="signal-bars" aria-hidden="true"><i /><i /><i /><i /></span>
+          <small>{{ device.rssi === undefined ? '— dBm' : `${device.rssi} dBm` }}</small>
+        </div>
         <button class="text-action" :disabled="connecting || device.deviceId === client.deviceId" @click="connectDevice(device)">
-          {{ device.deviceId === client.deviceId ? 'Подключено' : connecting ? 'Подключение…' : 'Подключить' }}
+          {{ device.deviceId === client.deviceId ? 'Подключено' : connectingDeviceId === device.deviceId ? 'Подключение…' : 'Подключить' }}
         </button>
       </div>
-      <div v-if="!devices.length && !scanning" class="empty-state">
+      <div v-if="!connectedDevices.length && !availableDevices.length && !scanning" class="empty-state">
         <Search :size="24" />
         <p>Пока нет найденных устройств</p>
       </div>
-      <button v-if="connected" class="secondary-action disconnect-action" @click="disconnectDevice">Отключить {{ deviceName }}</button>
     </section>
 
     <section v-else-if="activeTab === 'home'" class="screen home-screen">
       <section class="charge-section">
         <p class="section-kicker">ОСТАТОК ЗАРЯДА</p>
-        <div class="soc">{{ data.soc === null ? '—' : data.soc }}<span>%</span></div>
+        <div class="soc">{{ displayValue(data.soc, 0) }}<span>%</span></div>
         <div class="progress"><div :style="{ width: `${data.soc ?? 0}%` }" /></div>
         <div class="hero-readings">
-          <div><small>Напряжение</small><strong>{{ val(data.voltage, 2) }} <span>В</span></strong></div>
-          <div><small>Ток</small><strong>{{ val(data.current, 2) }} <span>А</span></strong></div>
+          <div><small>Напряжение</small><strong>{{ displayValue(data.voltage, 2) }} <span>В</span></strong></div>
+          <div><small>Ток</small><strong>{{ displayValue(data.current, 2) }} <span>А</span></strong></div>
         </div>
-        <div class="device-caption"><span class="state-dot" />{{ deviceName }}</div>
+        <div class="capacity-readings"><span>Емкость</span><strong>{{ displayValue(data.remainingCapacityAh, 2) }} / {{ displayValue(data.nominalCapacityAh, 2) }} <small>А·ч</small></strong></div>
+        <div class="device-caption"><span class="state-dot" />{{ deviceName || (mockMode ? DEMO_DEVICE_NAME : 'BMS не выбрана') }}</div>
       </section>
+      <p v-if="telemetryPending" class="telemetry-status"><RefreshCw :size="14" class="spinning" />{{ connected ? 'Чтение данных BMS…' : 'Подключение к BMS…' }}</p>
       <div class="home-toolbar">
         <p>{{ data.updatedAt ? `Обновлено ${new Date(data.updatedAt).toLocaleTimeString()}` : 'Ожидание показаний' }}</p>
-        <button v-if="connected" class="text-action" @click="disconnectDevice">Отключиться</button>
-        <button v-else class="text-action" @click="activeTab = 'devices'">Найти BMS</button>
+        <button v-if="connected" class="text-action" @click="disconnectDevice()">Отключиться</button>
+        <button v-else class="text-action" @click="openDevices">Найти BMS</button>
       </div>
+      <p v-if="!mockMode && !connected" class="notice notice-demo">Реальный режим активен. Подключитесь к BMS, чтобы увидеть показания.</p>
       <section class="data-section temperature-section">
         <h2>Температура</h2>
         <div v-if="data.temperatures.length" class="temperature-list">
@@ -327,12 +477,12 @@ const val = (n: number | null, digits = 1) => n === null ? '—' : n.toFixed(dig
       <section class="data-section cells-section">
         <div class="panelhead">
           <h2>Напряжение секций</h2>
-          <div class="cell-summary"><small>Min {{ BMS_CONFIG.cellVoltage.min.toFixed(3) }} В</small><small>Max {{ BMS_CONFIG.cellVoltage.max.toFixed(3) }} В</small><small>Δ {{ delta ?? '—' }} мВ</small></div>
+          <div class="cell-summary"><small>Min {{ measuredCellVoltageLabel('min') }}</small><small>Max {{ measuredCellVoltageLabel('max') }}</small><small>Δ {{ delta ?? '—' }} мВ</small></div>
         </div>
         <div v-if="data.cells.length" class="cells">
-          <div v-for="(voltage, i) in data.cells" :key="i" class="cell-item">
+          <div v-for="(voltage, i) in data.cells" :key="i" :class="['cell-item', cellExtremaClass(voltage)]">
             <small>#{{ i + 1 }}</small>
-            <div class="cell-bar" role="meter" :aria-label="`Секция ${i + 1}: ${val(voltage, 3)} В`" :aria-valuemin="BMS_CONFIG.cellVoltage.min" :aria-valuemax="BMS_CONFIG.cellVoltage.max" :aria-valuenow="voltage">
+            <div class="cell-bar" role="meter" :aria-label="`Секция ${i + 1}: ${val(voltage, 3)} В`" :aria-valuemin="cellVoltageLimitValue('min')" :aria-valuemax="cellVoltageLimitValue('max')" :aria-valuenow="voltage">
               <span aria-hidden="true" :style="{ width: `${cellBarWidth(voltage)}%` }" />
               <strong>{{ val(voltage, 3) }} В</strong>
             </div>
@@ -353,8 +503,10 @@ const val = (n: number | null, digits = 1) => n === null ? '—' : n.toFixed(dig
         </button>
       </div>
       <p v-if="settingsError" class="notice notice-error" role="alert">{{ settingsError }}</p>
-      <p v-if="!connected" class="notice notice-demo">Демо-поля можно менять для просмотра. Запись включится после подключения и чтения конфигурации.</p>
+      <p v-if="mockMode" class="notice notice-demo">Изменения доступны только для просмотра и не будут отправлены в BMS.</p>
+      <p v-else-if="!settingsLoaded" class="notice notice-demo">Подключитесь к BMS и прочитайте конфигурацию, чтобы увидеть реальные настройки.</p>
 
+      <template v-if="mockMode || settingsLoaded">
       <section class="settings-group">
         <h3>Конфигурация емкости</h3>
         <label class="setting-row" :class="{ changed: isDirty('cellCount') }"><span>Количество ячеек</span><span class="setting-control"><input v-model.number="settings.cellCount" type="number" min="1" max="32" step="1"><small>шт.</small></span></label>
@@ -393,6 +545,13 @@ const val = (n: number | null, digits = 1) => n === null ? '—' : n.toFixed(dig
         <h3>Function Configuration</h3>
         <label class="setting-toggle" :class="{ changed: isDirty('switchCircuitEnabled') }"><span>SW switch circuit enable</span><input v-model="settings.switchCircuitEnabled" type="checkbox"><span class="toggle-track" /></label>
         <div class="setting-row unsupported"><span>Display Celsius</span><span class="unsupported-value">Неизвестный бит для этой модели</span></div>
+      </section>
+
+      <section class="settings-group">
+        <h3>Управление выходами</h3>
+        <label class="setting-toggle" :class="{ changed: isDirty('chargeDisabled') }"><span>Отключить заряд</span><input v-model="settings.chargeDisabled" type="checkbox"><span class="toggle-track" /></label>
+        <label class="setting-toggle" :class="{ changed: isDirty('dischargeDisabled') }"><span>Отключить разряд</span><input v-model="settings.dischargeDisabled" type="checkbox"><span class="toggle-track" /></label>
+        <p class="settings-note">При записи отключение заряда или разряда может прервать работу зарядного устройства или подключенной нагрузки.</p>
       </section>
 
       <section class="settings-group">
@@ -441,14 +600,20 @@ const val = (n: number | null, digits = 1) => n === null ? '—' : n.toFixed(dig
       </ul>
       <div class="save-bar">
         <span>{{ dirtyKeys.length ? `${dirtyKeys.length} изменено` : 'Нет изменений' }}</span>
-        <button class="primary-action" :disabled="!connected || !settingsLoaded || !dirtyKeys.length || settingsValid.length > 0 || settingsSaving" @click="requestSave">
+        <button class="primary-action" :disabled="mockMode || !connected || !settingsLoaded || !dirtyKeys.length || settingsValid.length > 0 || settingsSaving" @click="requestSave">
           <Save :size="16" />{{ settingsSaving ? 'Запись…' : 'Записать в BMS' }}
         </button>
+      </div>
+      </template>
+      <div v-else class="empty-state settings-empty">
+        <BluetoothConnected :size="24" />
+        <p>Реальные настройки появятся после подключения к BMS.</p>
+        <button class="text-action" @click="openDevices">Найти устройство</button>
       </div>
     </section>
 
     <nav class="bottom-tabs" aria-label="Основная навигация">
-      <button :class="{ active: activeTab === 'devices' }" @click="activeTab = 'devices'"><BluetoothConnected :size="19" /><span>Устройства</span></button>
+      <button :class="{ active: activeTab === 'devices' }" @click="openDevices"><BluetoothConnected :size="19" /><span>Устройства</span></button>
       <button :class="{ active: activeTab === 'home' }" @click="activeTab = 'home'"><BatteryFull :size="19" /><span>Главная</span></button>
       <button :class="{ active: activeTab === 'settings' }" @click="activeTab = 'settings'"><SlidersHorizontal :size="19" /><span>Настройки</span></button>
     </nav>
@@ -457,7 +622,7 @@ const val = (n: number | null, digits = 1) => n === null ? '—' : n.toFixed(dig
       <section class="confirm-dialog" role="alertdialog" aria-modal="true" aria-labelledby="confirm-title">
         <div class="dialog-icon"><Save :size="20" /></div>
         <h2 id="confirm-title">Записать настройки?</h2>
-        <p>Будет изменено параметров: {{ dirtyKeys.length }}. Проверьте значения для химии и конфигурации именно вашего аккумулятора. Сохранение заменит настройки BMS и сбросит счетчики ошибок.</p>
+        <p>Будет изменено параметров: {{ dirtyKeys.length }}. Проверьте значения для химии и конфигурации именно вашего аккумулятора. Отключение заряда или разряда сразу влияет на выходы BMS. Сохранение настроек сбросит счетчики ошибок.</p>
         <div class="dialog-actions">
           <button class="secondary-action" @click="showSaveConfirmation = false">Отмена</button>
           <button class="primary-action" :disabled="settingsSaving" @click="saveSettings"><Save :size="16" />Подтвердить запись</button>

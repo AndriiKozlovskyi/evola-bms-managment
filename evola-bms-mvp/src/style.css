@@ -208,11 +208,15 @@ input {
 }
 
 .app-header h1 {
+  max-width: min(52vw, 360px);
+  overflow: hidden;
   margin: 5px 0 0;
   color: var(--foreground);
   font-size: 25px;
   font-weight: 650;
   letter-spacing: 0;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .connection-state {
@@ -226,6 +230,10 @@ input {
 
 .connection-state.is-connected {
   color: var(--foreground);
+}
+
+.connection-state.is-offline .state-dot {
+  background: #777;
 }
 
 .state-dot {
@@ -245,6 +253,41 @@ input {
   border: 0;
   border-radius: 0;
   background: transparent;
+}
+
+.data-mode-switch {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 3px;
+  margin: -10px 0 18px;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  padding: 3px;
+  background: var(--surface);
+}
+
+.data-mode-switch button {
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  gap: 7px;
+  min-height: 36px;
+  border: 0;
+  border-radius: 4px;
+  color: var(--muted);
+  background: transparent;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.data-mode-switch button.active {
+  color: #fff;
+  background: var(--accent);
+}
+
+.data-mode-switch button:focus-visible {
+  outline: 2px solid #fff;
+  outline-offset: 2px;
 }
 
 .section-toolbar,
@@ -310,15 +353,32 @@ input {
   font-size: 12px;
 }
 
+.show-all-devices {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  margin: 4px 0 12px;
+  color: var(--muted);
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.show-all-devices input {
+  width: 14px;
+  height: 14px;
+  margin: 0;
+  accent-color: var(--accent);
+}
+
 .is-pulsing {
   animation: pulse 1.2s ease-in-out infinite;
 }
 
 .device-row {
   display: grid;
-  grid-template-columns: 42px minmax(0, 1fr) auto;
+  grid-template-columns: 42px minmax(0, 1fr) auto auto;
   align-items: center;
-  gap: 12px;
+  gap: 9px;
   min-height: 68px;
   border-top: 1px solid var(--line);
 }
@@ -362,6 +422,98 @@ input {
   color: var(--accent);
 }
 
+.device-list-heading {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 10px;
+  margin-top: 22px;
+  border-bottom: 1px solid var(--line);
+  padding: 0 0 8px;
+}
+
+.device-list-heading h3 {
+  margin: 0;
+  color: var(--foreground);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.device-list-heading > span {
+  color: var(--muted);
+  font-size: 10px;
+  font-variant-numeric: tabular-nums;
+}
+
+.connected-device-row {
+  border-top: 0;
+}
+
+.signal-indicator {
+  display: flex;
+  min-width: 48px;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 3px;
+}
+
+.signal-indicator small {
+  color: var(--muted);
+  font-size: 9px;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.signal-bars {
+  display: flex;
+  height: 12px;
+  align-items: flex-end;
+  gap: 2px;
+}
+
+.signal-bars i {
+  display: block;
+  width: 3px;
+  border-radius: 1px 1px 0 0;
+  background: #555;
+}
+
+.signal-bars i:nth-child(1) { height: 4px; }
+.signal-bars i:nth-child(2) { height: 6px; }
+.signal-bars i:nth-child(3) { height: 9px; }
+.signal-bars i:nth-child(4) { height: 12px; }
+
+.signal-strong .signal-bars i {
+  background: var(--accent);
+}
+
+.signal-medium .signal-bars i:nth-child(4) {
+  opacity: 0.3;
+}
+
+.signal-weak .signal-bars i:nth-child(n + 3),
+.signal-poor .signal-bars i:nth-child(n + 2),
+.signal-unknown .signal-bars i {
+  opacity: 0.3;
+}
+
+.disconnect-button {
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  padding: 6px 8px;
+  color: var(--accent);
+  background: transparent;
+  font-size: 10px;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.connected-label {
+  color: var(--muted);
+  font-size: 10px;
+  white-space: nowrap;
+}
+
 .text-action {
   padding: 8px 0 8px 8px;
   border: 0;
@@ -396,6 +548,15 @@ input {
   margin: 0;
   color: var(--muted);
   font-size: 12px;
+}
+
+.settings-empty {
+  min-height: 220px;
+  text-align: center;
+}
+
+.settings-empty .text-action {
+  padding: 5px;
 }
 
 .disconnect-action {
@@ -475,6 +636,40 @@ input {
 .hero-readings strong span {
   color: var(--muted);
   font-size: 12px;
+}
+
+.capacity-readings {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+  margin-top: 14px;
+  border-top: 1px solid var(--line);
+  padding-top: 11px;
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.capacity-readings strong {
+  color: var(--foreground);
+  font-size: 13px;
+  font-weight: 550;
+  font-variant-numeric: tabular-nums;
+}
+
+.capacity-readings small {
+  color: var(--muted);
+  font-size: 10px;
+}
+
+.telemetry-status {
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  gap: 8px;
+  margin: 12px 0;
+  color: var(--muted);
+  font-size: 11px;
 }
 
 .device-caption {
@@ -599,8 +794,21 @@ input {
   inset: 0 auto 0 0;
   height: 100%;
   border-radius: 0;
-  background: var(--accent);
+  background: #777;
   transition: width 0.35s ease;
+}
+
+.home-screen .cell-item.cell-minimum .cell-bar > span {
+  background: #f5f5f5;
+}
+
+.home-screen .cell-item.cell-minimum .cell-bar strong {
+  color: #080808;
+  text-shadow: none;
+}
+
+.home-screen .cell-item.cell-maximum .cell-bar > span {
+  background: var(--accent);
 }
 
 .cell-bar strong {
