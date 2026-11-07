@@ -1,0 +1,54 @@
+# Node.js dependencies and build output
+node_modules/
+dist/
+build/
+coverage/
+.vite/
+*.tsbuildinfo
+
+# Logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# Local environment variables (keep templates)
+.env
+.env.*
+!.env.example
+!.env.*.example
+
+# Android / Gradle local state and generated files
+.gradle/
+.kotlin/
+**/build/
+local.properties
+captures/
+.cxx/
+.externalNativeBuild/
+android/app/src/main/assets/public/
+android/app/src/main/assets/capacitor.config.json
+android/app/src/main/assets/capacitor.plugins.json
+android/capacitor-cordova-android-plugins/
+
+# Signing credentials and packaged applications
+*.jks
+*.keystore
+keystore.properties
+key.properties
+*.apk
+*.aab
+
+# IDE and operating system files
+.idea/
+*.iml
+.vscode/*
+!.vscode/extensions.json
+!.vscode/settings.json
+.DS_Store
+Thumbs.db
+Desktop.ini
+*~
+*.swp
+*.swo
